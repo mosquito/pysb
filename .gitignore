@@ -1,0 +1,4 @@
+.*env
+
+# this project should never contains any dependencies
+*.lock

@@ -1,0 +1,30 @@
+[project]
+name = "snak"
+version = "0.1.0"
+description = "Python Standalone Build Management Tool"
+authors = [
+    {name = "Dmitry Orlov", email = "me@mosquito.su"}
+]
+license = {text = "MIT"}
+readme = "README.md"
+homepage = "https://github.com/mosquito/snak"
+repository = "https://github.com/mosquito/snak"
+keywords = ["python", "build", "management", "standalone", "virtualenv"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS"
+]
+requires-python = ">3.8"
+
+[project.scripts]
+snak = "snak:main"
+
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["snak"]
+include = ["snak.py"]

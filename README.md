@@ -1,52 +1,56 @@
-# `pysb` — Python Standalone Build Management Tool
+# `snak` — Python Standalone Build Management Tool
 
-`pysb` is a lightweight CLI utility to manage multiple **self-contained Python builds** and virtual environments,
+`snak` is a lightweight CLI utility to manage multiple **self-contained Python builds** and virtual environments,
 without touching your system Python installation.
 
-It downloads **prebuilt Python binaries** 
-(from [python-build-standalone](https://github.com/astral-sh/python-build-standalone)) directly, allowing you 
+It downloads **prebuilt Python binaries**
+(from [python-build-standalone](https://github.com/astral-sh/python-build-standalone)) directly, allowing you
 to **install, update, switch, and create virtual environments** independently and safely.
 
 ---
 
 ## Features
 
-- 📦 Install standalone Python builds easily
-- 🔄 Create and manage multiple virtual environments
-- 🔍 List and inspect installed versions and environments
-- ⚙️ Minimal configuration with sane defaults
-- 🛡️ System-safe: does not interfere with your system's Python
-- 🖥️ Works on **Linux** and **macOS**
+* 📦 Install standalone Python builds easily
+* 🔄 Create and manage multiple virtual environments
+* 🔍 List and inspect installed versions and environments
+* ⚙️ Minimal configuration with sane defaults
+* 🛡️ System-safe: does not interfere with your system's Python
+* 🖥️ Works on **Linux** and **macOS**
 
 ---
 
 ## Installation
 
-You can install `pysb` globally by running:
+You can install `snak` globally by running:
 
 ```bash
-curl -L https://raw.githubusercontent.com/mosquito/pysb/refs/heads/master/pysb.py | sudo install -Dm 755 /dev/stdin /usr/local/bin/pysb
+curl -L https://raw.githubusercontent.com/mosquito/snak/refs/heads/master/snak.py | sudo install -Dm 755 /dev/stdin /usr/local/bin/snak
 ```
 
 Alternatively, you can save the script manually and place it somewhere in your `$PATH`.
+
+```bash
+curl -L https://raw.githubusercontent.com/mosquito/snak/refs/heads/master/snak.py | sudo install -Dm 755 /dev/stdin ~/.bin/snak
+```
 
 ---
 
 ## Usage
 
 ```bash
-pysb [COMMAND] [SUBCOMMAND] [OPTIONS...]
+snak [COMMAND] [SUBCOMMAND] [OPTIONS...]
 ```
 
 High-level command structure:
 
-| Command     | Description                        |
-| ----------- | ---------------------------------- |
-| `env`       | Manage virtual environments        |
-| `versions`  | Manage standalone Python versions  |
-| `config`    | Manage `pysb` configuration         |
+| Command    | Description                       |
+| ---------- | --------------------------------- |
+| `env`      | Manage virtual environments       |
+| `versions` | Manage standalone Python versions |
+| `config`   | Manage `snak` configuration       |
 
-Run `pysb --help` to view all available commands.
+Run `snak --help` to view all available commands.
 
 ---
 
@@ -55,22 +59,22 @@ Run `pysb --help` to view all available commands.
 ### Install a new standalone Python version
 
 ```bash
-pysb versions list
-pysb versions install 3.12.2
+snak versions list
+snak versions install 3.12.2
 ```
 
 ### Create a new virtual environment
 
 ```bash
-pysb env create myenv
+snak env create myenv
 # (optionally install packages)
-pysb env create myenv -p requests flask
+snak env create myenv -p requests flask
 ```
 
 ### Activate an environment
 
 ```bash
-eval $(pysb env activate myenv)
+eval $(snak env activate myenv)
 ```
 
 *(Note: use `eval` to source the activation in your current shell.)*
@@ -78,58 +82,58 @@ eval $(pysb env activate myenv)
 ### List all environments
 
 ```bash
-pysb env list
+snak env list
 ```
 
 ### Remove a virtual environment
 
 ```bash
-pysb env remove myenv
+snak env remove myenv
 ```
 
 ### Show installed Python versions
 
 ```bash
-pysb versions list
+snak versions list
 ```
 
 ---
 
 ## Configuration
 
-`pysb` uses a simple INI-style configuration file:
+`snak` uses a simple INI-style configuration file:
 
-- **User mode**: `~/.local/share/pysb/config.ini`
-- **Root mode (sudo)**: `/etc/pysb.ini`
+* **User mode**: `~/.local/share/snak/config.ini`
+* **Root mode (sudo)**: `/etc/snak.ini`
 
 You can show or edit the configuration:
 
 ```bash
-pysb config show
-pysb config set paths cache ~/.cache/pysb/
+snak config show
+snak config set paths cache ~/.cache/snak/
 
 # for reverting to default just set empty value
-pysb config set paths cache ""
+snak config set paths cache ""
 ```
 
 ---
 
 ## Requirements
 
-`pysb` uses only standard libraries and does not require external Python packages.
+`snak` uses only standard libraries and does not require external Python packages.
 
-You need just a few things to run `pysb`:
+You need just a few things to run `snak`:
 
-- Linux or macOS
-- Python 3.8+
+* Linux or macOS
+* Python 3.8+
 
 ---
 
-## Why pysb?
+## Why `snak`?
 
-- No need to compile Python from source.
-- Fully isolated environments.
-- Great for experimenting with different Python versions easily.
+* No need to compile Python from source.
+* Fully isolated environments.
+* Great for experimenting with different Python versions easily.
 
 ---
 

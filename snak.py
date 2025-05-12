@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 import argparse
+import configparser
+import csv
+import enum
 import json
 import logging
 import os
@@ -13,114 +16,171 @@ import time
 import urllib.request
 import uuid
 from collections import Counter
-from configparser import ConfigParser
+from dataclasses import dataclass
+from functools import singledispatchmethod, cached_property
 from io import StringIO
 from pathlib import Path
 from shutil import rmtree
 from subprocess import run
 from tempfile import TemporaryDirectory
 from types import MappingProxyType
-from typing import IO, AbstractSet, Any
+from typing import IO, AbstractSet, Any, Mapping, Optional, Literal
+
+UNICODE_SUPPORT = sys.stdout.encoding.lower().startswith("utf") and sys.stdout.isatty()
 
 
-##################################################
-# Python standalone build (pysb) managenent tool #
-##################################################
+######################################################
+# snak is a python standalone builds management tool #
+######################################################
 
-# RUNTIME VARIABLES
+class ConfigParser(configparser.ConfigParser):
+    def __init__(self, set_defaults: Mapping[str, Mapping[str, Any]] = None, **kwargs):
+        super().__init__(**kwargs)
+        for section, options in set_defaults.items():
+            self.set_default(section, **options)
 
-SHELL = Path(os.getenv("SHELL", "/bin/bash")).resolve()
+    def set_default(self, section: str, **kwargs):
+        for key, value in kwargs.items():
+            if not self.has_section(section):
+                self.add_section(section)
 
-# CONFIGURATION
+            if not self.has_option(section, key):
+                self.set(section, key, str(value))
 
-CONFIG_PATH = Path("~/.local/share/pysb/config.ini").expanduser()
-if os.geteuid() == 0:
-    CONFIG_PATH = Path("/etc/pysb.ini").expanduser()
 
-CONFIG = ConfigParser()
-CONFIG.read(CONFIG_PATH)
+class Runtime:
+    config = ConfigParser(
+        set_defaults={
+            "paths": {
+                "cache": str(Path("/var/cache/snak/") if os.geteuid() == 0 else "~/.cache/snak/"),
+                "venvs": str(Path("/opt/python/envs") if os.geteuid() == 0 else "~/.local/share/snak/envs"),
+                "versions": str(Path("/opt/python/versions") if os.geteuid() == 0 else "~/.local/share/snak/versions"),
+            },
+            "releases": {
+                "url": "https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest",
+            },
+        }
+    )
 
-def set_default(section: str, key: str, value: str):
-    if not CONFIG.has_section(section):
-        CONFIG.add_section(section)
+    @classmethod
+    def get_venvs_path(cls) -> Path:
+        return Path(cls.config.get("paths", "venvs")).expanduser()
 
-    if not CONFIG.has_option(section, key):
-        CONFIG.set(section, key, value)
+    @classmethod
+    def get_versions_path(cls) -> Path:
+        return Path(cls.config.get("paths", "versions")).expanduser()
 
-set_default("releases", "url", "https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest")
 
-DEFAULT_BASE_PATH = "/opt/python" if os.geteuid() == 0 else "~/.local/share/pysb"
-if os.geteuid() == 0:
-    set_default("paths", "cache", "/var/cache/pysb/")
-else:
-    set_default("paths", "cache", "~/.cache/pysb/")
+class Colors(str, enum.Enum):
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    UNDERLINE = "\033[4m"
+    BLACK = "\033[30m"
+    RED = "\033[91m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    BLUE = "\033[94m"
+    MAGENTA = "\033[35m"
+    CYAN = "\033[36m"
+    WHITE = "\033[37m"
 
-set_default("paths", "venvs", str(Path(DEFAULT_BASE_PATH) / "envs"))
-set_default("paths", "versions", str(Path(DEFAULT_BASE_PATH) / "versions"))
 
-# Global variables from configuration
+@dataclass(frozen=True)
+class TableHeader:
+    value: str
+    format: str = ""
+    color: Optional[Colors] = None
 
-RELEASES_URL = CONFIG.get("releases", "url")
-CACHE_PATH = Path(CONFIG.get("paths", "cache"))
-CACHE_PATH.mkdir(parents=True, exist_ok=True)
+    @cached_property
+    def text(self) -> str:
+        fmt = "{:" + self.format + "}"
+        return fmt.format(self.value)
 
-VENVS_PATH = Path(CONFIG.get("paths", "venvs")).expanduser()
-VERSIONS_PATH = Path(CONFIG.get("paths", "versions")).expanduser()
+    def __str__(self):
+        if UNICODE_SUPPORT and self.color:
+            return f"{self.color.value}{self.text}{Colors.RESET.value}"
+        return self.text
+
+    def bold(self) -> str:
+        if UNICODE_SUPPORT:
+            return Colors.BOLD.value + str(self)
+        return str(self)
+
+    def copy(self, value) -> "TableHeader":
+        return TableHeader(value, self.format, self.color)
 
 
 class Table:
-    UNICODE_SUPPORT = sys.stdout.encoding.lower().startswith("utf")
-    BOOL_MARKS = MappingProxyType({True: "✅ ", False: "❌ "} if UNICODE_SUPPORT else {True: "yes", False: "no"})
+    BOOL_MARKS = MappingProxyType(
+        {True: "\U0001F518 ", False: "\U000026AA "} if UNICODE_SUPPORT else {True: "yes", False: "no"}
+    )
     TABLE_HEADER_SEPARATOR = "═" if UNICODE_SUPPORT else "="
 
-    def __init__(self, *header: str):
-        hdr = []
-        cols = []
-        for col in header:
-            if ":" in col:
-                h, fmt = col.split(":", 1)
-                cols.append(f"{{:{fmt}}}")
-                hdr.append(h)
-            else:
-                hdr.append(col)
-                cols.append(f"{{:<{len(col) + 2}}}")
-
-        self.format = " ".join(cols)
-        self.header = tuple(hdr)
+    def __init__(self, *header: TableHeader, format: Literal["table", "csv", "json"] = "table"):
+        self.header = tuple(header)
         self.rows = []
+        self.format = format
 
     def add(self, *row: Any):
         if len(row) != len(self.header):
             raise ValueError(f"Row length {len(row)} does not match header length {len(self.header)}")
         self.rows.append(tuple(row))
 
+    @singledispatchmethod
     def _convert(self, value) -> str:
-        match value:
-            case bool():
-                return self.BOOL_MARKS[value]
-            case float():
-                return f"{value:.2f}"
-            case _:
-                return str(value)
+        return str(value)
 
-    def write(self, fp: IO[str]) -> None:
-        header = self.format.format(*self.header)
-        fp.write(header + "\n")
-        fp.write(self.TABLE_HEADER_SEPARATOR * len(header) + "\n")
+    @_convert.register(bool)
+    def _(self, value: Path) -> str:
+        return self.BOOL_MARKS[value]
+
+    @_convert.register(float)
+    def _(self, value: float) -> str:
+        return f"{value:.2f}"
+
+    def format_table(self, fp: IO[str]) -> None:
+        header_len = 0
+        for hdr in self.header:
+            header = f"{hdr.bold()} "
+            header_len += len(hdr.text) + 1
+            fp.write(header)
+
+        fp.write("\n")
+        if UNICODE_SUPPORT:
+            fp.write(Colors.BOLD.value)
+        fp.write((self.TABLE_HEADER_SEPARATOR * header_len + "\n"))
+        if UNICODE_SUPPORT:
+            fp.write(Colors.RESET.value)
+
         for row in self.rows:
-            fp.write(self.format.format(*map(self._convert, row)))
+            values = list(map(self._convert, row))
+            for hdr, value in zip(self.header, values):
+                fp.write(str(hdr.copy(value)))
+                fp.write(" ")
             fp.write("\n")
 
+    def write(self, fp: IO[str]) -> None:
+        if self.format == "table":
+            self.format_table(fp)
+        elif self.format == "csv":
+            csv_writer = csv.writer(fp)
+            csv_writer.writerow([hdr.value for hdr in self.header])
+            for row in self.rows:
+                csv_writer.writerow(row)
+        elif self.format == "json":
+            result = []
+            for hdr, row in zip(self.header, self.rows):
+                result.append({hdr.value.lower(): value for hdr, value in zip(self.header, row)})
+            json.dump(result, fp, indent=1)
+
     def __str__(self):
-        fp = StringIO()
-        self.write(fp)
-        return fp.getvalue()
+        with StringIO() as fp:
+            self.write(fp)
+            return fp.getvalue()
 
 
-def subparser(
-    name: str, help: str, subparsers: Any, *arguments: dict[str, Any],
-):
-    subparser = subparsers.add_parser(
+def subparser(name: str, help: str, subparsers: Any, *arguments: dict[str, Any]):
+    parser = subparsers.add_parser(
         name,
         help=help,
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -128,15 +188,22 @@ def subparser(
 
     for arg in map(dict, arguments):
         names = list(map(lambda x: x.strip(), arg.pop("names").split(",")))
-        subparser.add_argument(*names, **arg)
+        parser.add_argument(*names, **arg)
 
     def decorator(func):
-        subparser.set_defaults(func=func)
+        parser.set_defaults(func=func)
         return func
 
     return decorator
 
+
 PARSER = argparse.ArgumentParser()
+PARSER.add_argument(
+    "-c", "--config", help="Path to configuration file", type=Path, dest="config_file",
+    default=Path("/etc/snak.ini" if os.geteuid() == 0 else "~/.local/share/snak/config.ini").expanduser(),
+)
+PARSER.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
+PARSER.add_argument("-f", "--format", choices=["table", "csv", "json"], default="table", help="Output format")
 SUBPARSERS = PARSER.add_subparsers()
 
 ENV_PARSER = SUBPARSERS.add_parser("env", help="Virtual environment management")
@@ -145,13 +212,13 @@ ENV_SUBPARSERS = ENV_PARSER.add_subparsers()
 
 
 @subparser("list", "List all available environments", ENV_SUBPARSERS)
-def env_list_parser(_: argparse.Namespace) -> int:
+def env_list_parser(args: argparse.Namespace) -> int:
     versions = sorted(
-        VERSIONS_PATH.glob("3.*/bin/python"),
+        Runtime.get_versions_path().glob("3.*/bin/python"),
         key=lambda f: f.parent.parent.name.split("."),
         reverse=True,
     )
-    venvs = VENVS_PATH.glob("*/bin/python")
+    venvs = Runtime.get_venvs_path().glob("*/bin/python")
 
     venv_counter = Counter()
     table_data = []
@@ -176,11 +243,17 @@ def env_list_parser(_: argparse.Namespace) -> int:
 
     table_data.sort(key=lambda x: (x[1], x[0]), reverse=True)
 
-    table = Table("#:<3", "Python version:>20", "venv:^4", "Used", "Name:<30")
-    for idx, (pybin, _, version) in enumerate(table_data):
-        is_venv = pybin.is_relative_to(VENVS_PATH)
+    table = Table(
+        TableHeader(value="Python", format=">10", color=Colors.GREEN),
+        TableHeader(value="venv", format="^4", color=Colors.CYAN),
+        TableHeader(value="Used", format="^4", color=Colors.YELLOW),
+        TableHeader(value="Name", format="<30", color=Colors.BOLD),
+        format=args.format,
+    )
+    for pybin, _, version in table_data:
+        is_venv = pybin.is_relative_to(Runtime.get_venvs_path())
         name = pybin.parent.parent.name if is_venv else ""
-        table.add(idx + 1, version["version"], is_venv, " " if is_venv else venv_counter[pybin], name)
+        table.add(version["version"], is_venv, " " if is_venv else venv_counter[pybin], name)
     table.write(sys.stdout)
 
     return 0
@@ -190,37 +263,53 @@ def env_list_parser(_: argparse.Namespace) -> int:
     "create", "Create a new virtual environment", ENV_SUBPARSERS,
     dict(names="name", help="Name of the environment to create"),
     dict(names="-p,--packages", nargs="+", help="Packages to install after creation"),
+    dict(names="-P,--python", help="Python version to use"),
 )
 def env_create_parser(args: argparse.Namespace) -> int:
-    target_path = VENVS_PATH / args.name
+    target_path = Runtime.get_venvs_path() / args.name
     if target_path.exists():
         logging.error(f"Environment %s already exists %s", args.name, target_path)
         return 1
 
     versions = sorted(
-        VERSIONS_PATH.glob("3.*/bin/python"),
+        Runtime.get_versions_path().glob("3.*/bin/python"),
         key=lambda f: f.parent.parent.name.split("."),
         reverse=True,
     )
 
-    versions_map = {}
+    versions_map: dict[Path, dict] = {}
 
-    table = Table("#:<3", "Python version")
-    for idx, version in enumerate(versions):
+    for version in versions:
         version_file = version.parent.parent / "version.json"
         if not version_file.exists():
             continue
 
         version_meta = json.loads(version_file.read_text())
-        table.add(idx + 1, version_meta["version"])
-        versions_map[str(idx + 1)] = version
+        versions_map[version] = version_meta
 
-    table.write(sys.stdout)
-    selected = input("Select Python version number: ")
-    while selected not in versions_map:
-        selected = input("Invalid version number, select again: ")
+    def find_suitable_version(version_string: str) -> Optional[Path]:
+        candidates = []
+        for version_path, meta in versions_map.items():
+            if meta["version"].startswith(version_string):
+                candidates.append(version_path)
 
-    run([versions_map[selected], "-m", "venv", str(target_path)], check=True)
+        if not candidates:
+            return None
+        if len(candidates) > 1:
+            logging.error("Multiple versions found matching your criteria:\n%s", "\n".join(candidates))
+            return None
+        return candidates[0]
+
+    if args.python is None:
+        selected = sorted(versions_map.keys(), reverse=True)[0]
+        logging.info("Latest installed version will be used: %s", versions_map[selected]["version"])
+    else:
+        selected = find_suitable_version(args.python)
+        if selected is None:
+            logging.error("No versions found matching your criteria")
+            return 1
+
+    run([selected, "-m", "venv", str(target_path)], check=True)
     logging.info(f"Created environment %s: %s", args.name, target_path)
 
     if args.packages:
@@ -237,7 +326,7 @@ def env_create_parser(args: argparse.Namespace) -> int:
     dict(names="env", help="Name of the environment to create"),
 )
 def env_remove_parser(args: argparse.Namespace) -> int:
-    target_path = VENVS_PATH / args.env
+    target_path = Runtime.get_venvs_path() / args.env
     if not target_path.exists():
         logging.error(f"Environment %s does not exist %s", args.env, target_path)
         return 1
@@ -246,23 +335,27 @@ def env_remove_parser(args: argparse.Namespace) -> int:
     logging.info(f"Removed environment %s: %s", args.env, target_path)
     return 0
 
+
 @subparser(
     "activate", "Remove virtual environment", ENV_SUBPARSERS,
     dict(names="env", help="Name of the environment to create"),
 )
 def env_activate_parser(args: argparse.Namespace) -> int:
-    target_path = VENVS_PATH / args.env
+    target_path = Runtime.get_venvs_path() / args.env
     if not target_path.exists():
         logging.error(f"Environment %s does not exist %s", args.env, target_path)
         return 1
 
-    match SHELL.name:
-        case "fish":
-            activate_script = target_path / "bin" / "activate.fish"
-        case "csh":
-            activate_script = target_path / "bin" / "activate.csh"
-        case _:
-            activate_script = target_path / "bin" / "activate"
+    shell_activate_scripts = {
+        "bash": target_path / "bin" / "activate",
+        "zsh": target_path / "bin" / "activate",
+        "fish": target_path / "bin" / "activate.fish",
+        "csh": target_path / "bin" / "activate.csh",
+    }
+
+    activate_script = shell_activate_scripts.get(
+        Path(os.getenv("SHELL", "/bin/bash")).name, shell_activate_scripts["bash"]
+    )
 
     if sys.stdout.isatty():
         logging.warning("For activating environment in current shell use eval expression")
@@ -279,7 +372,6 @@ VERSIONS_PARSER.set_defaults(func=lambda _: VERSIONS_PARSER.print_help())
 
 VERSIONS_SUBPARSERS = VERSIONS_PARSER.add_subparsers()
 
-
 SSL_CONTEXT = ssl.create_default_context()
 if not Path("/etc/ssl/certs/ca-certificates.crt").resolve().exists():
     SSL_CONTEXT.check_hostname = False
@@ -288,7 +380,7 @@ if not Path("/etc/ssl/certs/ca-certificates.crt").resolve().exists():
 
 def fetch(url, cache=3600 * 4) -> IO[bytes]:
     obj = str(uuid.uuid3(uuid.NAMESPACE_URL, url))
-    cache_path = CACHE_PATH / "cache" / obj[:2] / obj[2:4] / obj
+    cache_path = Path(Runtime.config.get("paths", "cache")) / "cache" / obj[:2] / obj[2:4] / obj
     cache_path.parent.mkdir(parents=True, exist_ok=True)
 
     if not (cache_path.exists() and cache_path.stat().st_mtime > (time.time() - cache)):
@@ -300,12 +392,12 @@ def fetch(url, cache=3600 * 4) -> IO[bytes]:
 
 
 def get_versions(
-    libc: AbstractSet[str] = frozenset({platform.libc_ver()[0]}),
-    system: AbstractSet[str] = frozenset({platform.system().lower()}),
-    machine: AbstractSet[str] = frozenset({platform.machine()}),
-    stripped: bool = True,
+        libc: AbstractSet[str] = frozenset({platform.libc_ver()[0]}),
+        system: AbstractSet[str] = frozenset({platform.system().lower()}),
+        machine: AbstractSet[str] = frozenset({platform.machine()}),
+        stripped: bool = True,
 ):
-    release = json.load(fetch(RELEASES_URL))
+    release = json.load(fetch(Runtime.config.get("releases", "url")))
     assets = release["assets"]
     machine_map = {
         "x86_64": "x86_64",
@@ -391,13 +483,20 @@ def python_list_parser(args: argparse.Namespace) -> int:
     versions = get_versions(machine=frozenset(args.arch), libc=frozenset(args.libc), stripped=not args.non_stripped)
 
     table = Table(
-        "#:<3", "Version:<10", "Arch:>8", "OS:>10", "Platform:>10", "Libc:>10", "Stripped:^8", "Installed:^8",
+        TableHeader(value="Version", format=">10", color=Colors.GREEN),
+        TableHeader(value="Arch", format=">8", color=Colors.MAGENTA),
+        TableHeader(value="OS", format=">10", color=Colors.YELLOW),
+        TableHeader(value="Vendor", format=">10", color=Colors.BLUE),
+        TableHeader(value="Libc", format=">10", color=Colors.RED),
+        TableHeader(value="Stripped", format="^8", color=Colors.CYAN),
+        TableHeader(value="Installed", format="^8"),
+        format=args.format,
     )
 
-    for idx, version in enumerate(versions):
-        installed = (VERSIONS_PATH / version["install_name"]).is_dir()
+    for version in versions:
+        installed = (Runtime.get_versions_path() / version["install_name"] / "version.json").exists()
         table.add(
-            idx + 1, version["version"], version["arch"], version["os"], version["vendor"],
+            version["version"], version["arch"], version["os"], version["vendor"],
             version["libc"], "stripped" in version["variant"], installed,
         )
 
@@ -408,7 +507,7 @@ def python_list_parser(args: argparse.Namespace) -> int:
 @subparser(
     "install", "Install Python version", VERSIONS_SUBPARSERS,
     dict(names="--non-stripped", action="store_true", help="Install non stripped version"),
-    dict(names="--arch",help="Install specific architecture", default=platform.machine()),
+    dict(names="--arch", help="Install specific architecture", default=platform.machine()),
     dict(
         names="--libc", help="Show specific libc versions",
         choices=["N/A", "musl", "gnu", "gnueabihf", "gnueabi"],
@@ -419,7 +518,7 @@ def python_list_parser(args: argparse.Namespace) -> int:
 def python_install_parser(args: argparse.Namespace) -> int:
     versions = list(
         filter(
-            lambda item: item["version"] == args.version,
+            lambda item: item["version"].startswith(args.version),
             get_versions(
                 machine=frozenset([args.arch]),
                 stripped=not args.non_stripped,
@@ -437,7 +536,7 @@ def python_install_parser(args: argparse.Namespace) -> int:
         return 1
 
     ver = versions[0]
-    install_path = VERSIONS_PATH / ver["install_name"]
+    install_path = Runtime.get_versions_path() / ver["install_name"]
 
     if install_path.exists():
         logging.error("Version %s already installed at %s", ver["version"], install_path)
@@ -445,7 +544,7 @@ def python_install_parser(args: argparse.Namespace) -> int:
 
     install_path.mkdir(parents=True, exist_ok=True)
 
-    with TemporaryDirectory(dir=CACHE_PATH, suffix=".download") as tmpdir:
+    with TemporaryDirectory(dir=Path(Runtime.config.get("paths", "cache")), suffix=".download") as tmpdir:
         tmp_path = Path(tmpdir)
         extract_path = tmp_path / "extract"
         extract_path.mkdir(parents=True, exist_ok=True)
@@ -464,18 +563,24 @@ def python_install_parser(args: argparse.Namespace) -> int:
     logging.info("Installed Python %s to %s", ver["version"], install_path)
     return 0
 
+
 CONFIG_PARSER = SUBPARSERS.add_parser("config", help="Configuration management")
 CONFIG_PARSER.set_defaults(func=lambda _: CONFIG_PARSER.print_help())
 
 CONFIG_SUBPARSERS = CONFIG_PARSER.add_subparsers()
 
-@subparser(
-    "show", "Show configuration", CONFIG_SUBPARSERS,
-)
-def config_show_parser(_: argparse.Namespace) -> int:
-    table = Table("Section:8", "Key:20", "Value:52")
-    for section in CONFIG.sections():
-        for key, value in CONFIG.items(section):
+
+@subparser("show", "Show configuration", CONFIG_SUBPARSERS)
+def config_show_parser(args: argparse.Namespace) -> int:
+    table = Table(
+        TableHeader(value="Section", format="8", color=Colors.MAGENTA),
+        TableHeader(value="Key", format="20", color=Colors.GREEN),
+        TableHeader(value="Value", format="52", color=Colors.CYAN),
+        format=args.format,
+    )
+
+    for section in Runtime.config.sections():
+        for key, value in Runtime.config.items(section):
             table.add(section, key, value)
     table.write(sys.stdout)
     return 0
@@ -489,30 +594,60 @@ def config_show_parser(_: argparse.Namespace) -> int:
     dict(names="value", help="Configuration value"),
 )
 def config_show_parser(args: argparse.Namespace) -> int:
-    if not CONFIG.has_section(args.section):
-        CONFIG.add_section(args.section)
+    if not Runtime.config.has_section(args.section):
+        Runtime.config.add_section(args.section)
 
     if not args.value:
-        if not CONFIG.has_option(args.section, args.key):
+        if not Runtime.config.has_option(args.section, args.key):
             logging.error("Key %s.%s does not exist", args.section, args.key)
             return 1
         logging.info("Unsetting %s.%s", args.section, args.key)
-        CONFIG.remove_option(args.section, args.key)
+        Runtime.config.remove_option(args.section, args.key)
     else:
         logging.info("Setting %s.%s = %s", args.section, args.key, args.value)
-        CONFIG.set(args.section, args.key, args.value)
+        Runtime.config.set(args.section, args.key, args.value)
 
-    with CONFIG_PATH.open("w") as fp:
-        CONFIG.write(fp)
+    with args.config_file.open("w") as fp:
+        Runtime.config.write(fp)
 
     return 0
 
 
+class UnicodeLoggingFormatter(logging.Formatter):
+    LEVEL_MAPPING = MappingProxyType({
+        logging.ERROR: "\U0000274C",
+        logging.WARNING: "\U000026A0",
+        logging.INFO: "\U00002705",
+        logging.DEBUG: "\U0001F50E",
+        logging.CRITICAL: "\U00002757",
+    })
 
-def main():
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    def formatMessage(self, record):
+        if UNICODE_SUPPORT:
+            record.levelname = self.LEVEL_MAPPING.get(record.levelno, "➡")
+        return self._style.format(record)
 
-    args = PARSER.parse_args()
+
+def main(*argv):
+    if not logging.getLogger().hasHandlers():
+        logging.basicConfig(level=logging.INFO)
+
+    formatter = UnicodeLoggingFormatter("%(levelname)s\t%(message)s")
+    for handler in logging.getLogger().handlers:
+        handler.setFormatter(formatter)
+
+    args = PARSER.parse_args(argv) if argv else PARSER.parse_args()
+
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+        logging.debug("Verbose mode enabled")
+
+    read_configs = Runtime.config.read(args.config_file)
+    if read_configs:
+        logging.debug("Using configuration files %s", ", ".join(read_configs))
+    else:
+        logging.debug("Configuration file %s not found, using defaults", args.config_file)
+    Path(Runtime.config.get("paths", "cache")).mkdir(parents=True, exist_ok=True)
     if not hasattr(args, "func"):
         PARSER.print_help()
         return 1
