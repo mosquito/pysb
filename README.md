@@ -25,13 +25,13 @@ to **install, update, switch, and create virtual environments** independently an
 You can install `snak` globally by running:
 
 ```bash
-curl -L https://raw.githubusercontent.com/mosquito/snak/refs/heads/master/snak.py | sudo install -Dm 755 /dev/stdin /usr/local/bin/snak
+curl -L https://raw.githubusercontent.com/mosquito/snak/refs/heads/master/src/snak.py | sudo install -Dm 755 /dev/stdin /usr/local/bin/snak
 ```
 
 Alternatively, you can save the script manually and place it somewhere in your `$PATH`.
 
 ```bash
-curl -L https://raw.githubusercontent.com/mosquito/snak/refs/heads/master/snak.py | sudo install -Dm 755 /dev/stdin ~/.bin/snak
+pip install --user snak
 ```
 
 ---
