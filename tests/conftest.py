@@ -4,7 +4,7 @@ from typing import Callable
 
 import pytest
 
-import snak
+from src import snak
 
 
 @pytest.fixture(params=[True, False])

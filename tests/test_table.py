@@ -2,7 +2,7 @@ import json
 
 import pytest
 from io import StringIO
-from snak import Table, TableHeader, Colors
+from src.snak import Table, TableHeader, Colors
 
 
 def test_table_initialization(unicode_support_toggle):
